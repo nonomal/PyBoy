@@ -2,65 +2,52 @@
 # License: See LICENSE.md file
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
-__pdoc__ = {
-    "GameWrapperKirbyDreamLand.cartridge_title": False,
-    "GameWrapperKirbyDreamLand.post_tick": False,
-}
-
-import logging
-
-from pyboy.utils import WindowEvent
+import pyboy
+from pyboy.utils import PyBoyException
 
 from .base_plugin import PyBoyGameWrapper
 
-logger = logging.getLogger(__name__)
-
-try:
-    from cython import compiled
-    cythonmode = compiled
-except ImportError:
-    cythonmode = False
+logger = pyboy.logging.get_logger(__name__)
 
 
 class GameWrapperKirbyDreamLand(PyBoyGameWrapper):
     """
-    This class wraps Kirby Dream Land, and provides easy access to score and a "fitness" score for AIs.
+    This class wraps Kirby Dream Land, and provides easy access for AIs.
 
     If you call `print` on an instance of this object, it will show an overview of everything this object provides.
     """
-    cartridge_title = "KIRBY DREAM LA"
+
+    cartridge_title = "KIRBY DREAM LAN"
 
     def __init__(self, *args, **kwargs):
-        self.shape = (20, 16)
-        """The shape of the game area"""
         self.score = 0
         """The score provided by the game"""
         self.health = 0
         """The health provided by the game"""
         self.lives_left = 0
         """The lives remaining provided by the game"""
-        self.fitness = 0
-        """
-        A built-in fitness scoring. Taking score, health, and lives left into account.
+        self._game_over = False
+        """The game over state"""
 
-        .. math::
-            fitness = score \\cdot health \\cdot lives\\_left
-        """
-        super().__init__(*args, game_area_section=(0, 0) + self.shape, game_area_wrap_around=True, **kwargs)
+        super().__init__(*args, game_area_section=(0, 0, 20, 16), game_area_follow_scxy=True, **kwargs)
 
     def post_tick(self):
         self._tile_cache_invalid = True
         self._sprite_cache_invalid = True
 
         self.score = 0
-        for n in range(4):
-            self.score += self.pyboy.get_memory_value(0xD070 + n) * 10**n
+        score_digits = 4
+        for n in range(score_digits):
+            self.score += self.pyboy.memory[0xD070 + n] * 10 ** (score_digits - n)
 
-        self.health = self.pyboy.get_memory_value(0xD086)
-        self.lives_left = self.pyboy.get_memory_value(0xD089) - 1
+        # Check if game is over
+        prev_health = self.health
+        self.health = self.pyboy.memory[0xD086]
+        if self.lives_left == 0:
+            if prev_health > 0 and self.health == 0:
+                self._game_over = True
 
-        if self.game_has_started:
-            self.fitness = self.score * self.health * self.lives_left
+        self.lives_left = self.pyboy.memory[0xD089] - 1
 
     def start_game(self, timer_div=None):
         """
@@ -71,55 +58,43 @@ class GameWrapperKirbyDreamLand(PyBoyGameWrapper):
         instantly.
 
         Kwargs:
-            timer_div (int): Replace timer's DIV register with this value. Use `None` to randomize.
+            * timer_div (int): Replace timer's DIV register with this value. Use `None` to randomize.
         """
-        PyBoyGameWrapper.start_game(self, timer_div=timer_div)
+        if self.game_has_started:
+            raise PyBoyException("Gamewrapper already started! Use 'reset' instead.")
 
         # Boot screen
         while True:
-            self.pyboy.tick()
-            self.tilemap_background.refresh_lcdc()
-            if self.tilemap_background[0:3, 16] == [231, 224, 235]: # 'HAL' on the first screen
+            self.pyboy.tick(1, False)
+            if self.tilemap_background[0:3, 16] == [231, 224, 235]:  # 'HAL' on the first screen
                 break
 
         # Wait for transition to finish (start screen)
-        for _ in range(25):
-            self.pyboy.tick()
-
-        self.pyboy.send_input(WindowEvent.PRESS_BUTTON_START)
+        self.pyboy.tick(25, False)
+        self.pyboy.button("start")
         self.pyboy.tick()
-        self.pyboy.send_input(WindowEvent.RELEASE_BUTTON_START)
 
         # Wait for transition to finish (exit start screen, enter level intro screen)
-        for _ in range(60):
-            self.pyboy.tick()
+        self.pyboy.tick(60, False)
 
         # Skip level intro
-        self.pyboy.send_input(WindowEvent.PRESS_BUTTON_START)
+        self.pyboy.button("start")
         self.pyboy.tick()
-        self.pyboy.send_input(WindowEvent.RELEASE_BUTTON_START)
 
         # Wait for transition to finish (exit level intro screen, enter game)
-        for _ in range(60):
-            self.pyboy.tick()
+        self.pyboy.tick(60, False)
 
-        self.game_has_started = True
-
-        self.saved_state.seek(0)
-        self.pyboy.save_state(self.saved_state)
-
-        self._set_timer_div(timer_div)
+        PyBoyGameWrapper.start_game(self, timer_div=timer_div)
 
     def reset_game(self, timer_div=None):
         """
         After calling `start_game`, you can call this method at any time to reset the game.
 
         Kwargs:
-            timer_div (int): Replace timer's DIV register with this value. Use `None` to randomize.
+            * timer_div (int): Replace timer's DIV register with this value. Use `None` to randomize.
         """
+        self._game_over = False
         PyBoyGameWrapper.reset_game(self, timer_div=timer_div)
-
-        self._set_timer_div(timer_div)
 
     def game_area(self):
         """
@@ -148,35 +123,19 @@ class GameWrapperKirbyDreamLand(PyBoyGameWrapper):
 
         Returns
         -------
-        memoryview:
-            Simplified 2-dimensional memoryview of the screen
+        numpy.ndarray:
+            Simplified two-dimensional array of mapped tile identifiers with dtype `numpy.uint32`.
         """
         return PyBoyGameWrapper.game_area(self)
 
     def game_over(self):
-        return self.health == 0
+        return self._game_over
 
     def __repr__(self):
-        adjust = 4
-        # yapf: disable
         return (
-            f"Kirby Dream Land:\n" +
-            f"Score: {self.score}\n" +
-            f"Health: {self.health}\n" +
-            f"Lives left: {self.lives_left}\n" +
-            f"Fitness: {self.fitness}\n" +
-            "Sprites on screen:\n" +
-            "\n".join([str(s) for s in self._sprites_on_screen()]) +
-            "\n" +
-            "Tiles on screen:\n" +
-            " "*5 + "".join([f"{i: <4}" for i in range(10)]) + "\n" +
-            "_"*(adjust*20+4) +
-            "\n" +
-            "\n".join(
-                [
-                    f"{i: <3}| " + "".join([str(tile).ljust(adjust) for tile in line])
-                    for i, line in enumerate(self.game_area())
-                ]
-            )
+            "Kirby Dream Land:\n"
+            + f"Score: {self.score}\n"
+            + f"Health: {self.health}\n"
+            + f"Lives left: {self.lives_left}\n"
+            + super().__repr__()
         )
-        # yapf: enable

@@ -1,0 +1,496 @@
+"""Generate the Markdown test-results report and copy its image baselines."""
+
+import json
+import re
+import shutil
+from xml.etree import ElementTree
+from pathlib import Path
+from urllib.parse import quote
+
+
+DOCS_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = DOCS_DIR.parent
+RESULTS_DIR = PROJECT_ROOT / "tests" / "test_results"
+OUTPUT = DOCS_DIR / "wiki" / "test-results.md"
+IMAGE_OUTPUT = DOCS_DIR / "wiki" / "assets" / "test-results"
+JUNIT_XML = RESULTS_DIR / "pytest.xml"
+EXCLUDED_IMAGE_SUITES = {"Boot ROM modes", "Pokemon Blue", "Sound swoosh", "which", "whichboot", "rtc3test"}
+GITHUB_RESULTS_BASE = "https://github.com/Baekalfen/PyBoy/blob/master/"
+GITHUB_RESULTS_TREE_BASE = "https://github.com/Baekalfen/PyBoy/tree/master/"
+RESULT_COLORS = {"Passed": "#1a7f37", "Failed": "#cf222e"}
+SUITE_TEST_FILES = {
+    "Blargg": ("tests/test_blargg.py",),
+    "SameSuite": ("tests/test_samesuite.py",),
+    "Mooneye": ("tests/test_mooneye.py",),
+    "RTC3Test": ("tests/test_rtc3test.py",),
+    "which": ("tests/test_which.py",),
+    "GB Tests": ("tests/test_shonumi.py",),
+    "TurtleTest": ("tests/test_turtle.py",),
+    "Magen": ("tests/test_magen.py",),
+    "MBC30": ("tests/test_mbc30.py",),
+    "Mooneye image results": ("tests/test_mooneye.py",),
+    "Acid2": ("tests/test_acid_dmg.py", "tests/test_acid_cgb.py"),
+    "BullyGB": ("tests/test_bully.py",),
+    "Strikethrough": ("tests/test_strikethrough.py",),
+    "CGB Acid Hell": ("tests/test_acid_hell.py",),
+    "CasualPokePlayer": ("tests/test_cpp.py",),
+    "Daid": ("tests/test_daid.py",),
+    "GB Printer": ("tests/test_printer.py",),
+    "Mealybug": ("tests/test_mealybug.py",),
+}
+
+
+def github_result_url(path):
+    relative = path.relative_to(PROJECT_ROOT).as_posix()
+    return GITHUB_RESULTS_BASE + quote(relative, safe="/")
+
+
+def github_results_directory_url(path):
+    relative = path.relative_to(PROJECT_ROOT).as_posix()
+    return GITHUB_RESULTS_TREE_BASE + quote(relative, safe="/")
+
+
+def github_file_url(relative):
+    return GITHUB_RESULTS_BASE + quote(relative, safe="/")
+
+
+def github_links_line(suite):
+    line = f"[Results on GitHub]({suite['url']})"
+    test_files = SUITE_TEST_FILES.get(suite["name"], ())
+    if test_files:
+        pytest_links = ", ".join(f"[{Path(f).name}]({github_file_url(f)})" for f in test_files)
+        line += f" · Pytest: {pytest_links}"
+    return line
+
+
+def load_junit_statuses(path):
+    if not path.exists():
+        return {}
+
+    statuses = {}
+    root = ElementTree.parse(path).getroot()
+    for testcase in root.iter("testcase"):
+        if testcase.find("failure") is not None or testcase.find("error") is not None:
+            status = "Failed"
+        elif testcase.find("skipped") is not None:
+            skipped = testcase.find("skipped")
+            status = "Failed" if skipped.attrib.get("type") == "pytest.xfail" else "Skipped"
+        else:
+            status = "Passed"
+        key = (testcase.attrib.get("classname", ""), testcase.attrib.get("name", ""))
+        statuses[key] = status
+    return statuses
+
+
+def load_junit_skips(path):
+    if not path.exists():
+        return {}
+
+    skips = {}
+    root = ElementTree.parse(path).getroot()
+    for testcase in root.iter("testcase"):
+        skipped = testcase.find("skipped")
+        if skipped is not None and skipped.attrib.get("type") != "pytest.xfail":
+            key = (testcase.attrib.get("classname", ""), testcase.attrib.get("name", ""))
+            skips[key] = skipped.attrib.get("message", "")
+    return skips
+
+
+def junit_status(statuses, classname, name):
+    return statuses.get((classname, name), "Not run")
+
+
+def junit_status_prefix(statuses, classname, prefix):
+    matches = [
+        status for (case_class, name), status in statuses.items() if case_class == classname and name.startswith(prefix)
+    ]
+    return matches[0] if len(matches) == 1 else "Not run"
+
+
+def load_json_suite(name, path, statuses, test_name_for, image_for=None):
+    data = json.loads(path.read_text())
+    results = []
+    for key in sorted(data):
+        status = test_name_for(statuses, key)
+        image = None
+        if image_for is not None:
+            source = image_for(key)
+            if source is not None and source.exists():
+                target = IMAGE_OUTPUT / safe_image_name(source)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                image = target.name
+        results.append((key, image, status))
+    return {"name": name, "results": results, "url": github_result_url(path)}
+
+
+def blargg_test_status(statuses, case):
+    return junit_status_prefix(statuses, "tests.test_blargg", f"test_blarggs[{case.removeprefix('blargg/')}-")
+
+
+def samesuite_test_status(statuses, case):
+    is_cgb = case.endswith(" [CGB]")
+    rom = case.removesuffix(" [CGB]")
+    mode = "CGB" if is_cgb else "DMG"
+    return junit_status(statuses, "tests.test_samesuite", f"test_samesuite[{mode}-{rom}]")
+
+
+def mooneye_test_status(statuses, case):
+    is_cgb = case.endswith(" [CGB]")
+    rom = case.removesuffix(" [CGB]")
+    # The emulator-only ROMs are parametrized with clean=True
+    clean = rom.startswith("emulator-only/")
+    mode = "CGB" if is_cgb else "DMG"
+    return junit_status(statuses, "tests.test_mooneye", f"test_mooneye[{mode}-{clean}-{rom}]")
+
+
+def rtc3test_status(statuses, case):
+    return junit_status(statuses, "tests.test_rtc3test", f"test_rtc3test[{case}]")
+
+
+def which_test_status(statuses, case):
+    return junit_status(statuses, "tests.test_which", f"test_which[{case}]")
+
+
+def image_suite_name(path):
+    relative = path.relative_to(RESULTS_DIR)
+    if len(relative.parts) > 1:
+        return {
+            "GB Tests": "GB Tests",
+            "TurtleTest": "TurtleTest",
+            "all_modes": "Boot ROM modes",
+            "magen": "Magen",
+            "mbc30": "MBC30",
+            "mooneye": "Mooneye image results",
+            "pokemon_blue": "Pokemon Blue",
+            "which": "which",
+            "whichboot": "whichboot",
+            "bully": "BullyGB",
+            "strikethrough": "Strikethrough",
+            "cpp": "CasualPokePlayer",
+            "daid": "Daid",
+            "cgb-acid-hell": "CGB Acid Hell",
+            "mealybug": "Mealybug",
+        }.get(relative.parts[0], relative.parts[0])
+    if "acid2" in path.name:
+        return "Acid2"
+    if path.name == "print_gbprinter.png":
+        return "GB Printer"
+    if path.name.startswith("sound_swoosh_"):
+        return "Sound swoosh"
+    return "Image results"
+
+
+def safe_image_name(path):
+    relative = path.relative_to(RESULTS_DIR).as_posix()
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", relative)
+
+
+def image_test_status(path, suite_name, statuses):
+    if suite_name == "GB Tests":
+        return junit_status(statuses, "tests.test_shonumi", f"test_shonumi[{path.stem}]")
+    if suite_name == "TurtleTest":
+        return junit_status(statuses, "tests.test_turtle", f"test_turtletests[{path.stem}]")
+    if suite_name == "Magen":
+        return junit_status_prefix(statuses, "tests.test_magen", f"test_magen_test[{path.stem}-")
+    if suite_name == "MBC30":
+        return junit_status(statuses, "tests.test_mbc30", "test_mbc30_test_rom")
+    if suite_name == "Mooneye image results":
+        case = path.relative_to(RESULTS_DIR / "mooneye").with_suffix("").as_posix()
+        is_cgb = case.endswith(" [CGB]")
+        rom = case.removesuffix(" [CGB]")
+        if rom.startswith("manual-only/"):
+            # The manual-only ROMs are covered by a dedicated test, not the
+            # parametrized test_mooneye cases
+            return junit_status(statuses, "tests.test_mooneye", f"test_mooneye_sprite[{'CGB' if is_cgb else 'DMG'}]")
+        clean = rom.startswith("emulator-only/")
+        mode = "CGB" if is_cgb else "DMG"
+        return junit_status(statuses, "tests.test_mooneye", f"test_mooneye[{mode}-{clean}-{rom}]")
+    if suite_name == "Acid2":
+        if path.name == "cgb_acid2.gbc.png":
+            return junit_status(statuses, "tests.test_acid_cgb", "test_cgb_acid")
+        cgb = path.name.startswith("cgb_")
+        return junit_status(statuses, "tests.test_acid_dmg", f"test_dmg_acid[{cgb}]")
+    if suite_name == "BullyGB":
+        return junit_status(statuses, "tests.test_bully", "test_bully")
+    if suite_name == "Strikethrough":
+        return junit_status(statuses, "tests.test_strikethrough", "test_strikethrough")
+    if suite_name == "CGB Acid Hell":
+        return junit_status(statuses, "tests.test_acid_hell", "test_cgb_acid_hell")
+    if suite_name == "CasualPokePlayer":
+        return junit_status_prefix(statuses, "tests.test_cpp", f"test_cpp[{path.stem}-")
+    if suite_name == "Daid":
+        # The daid cases use the custom parametrized ids from tests/test_daid.py
+        daid_ids = {
+            "ppu_scanline_bgp.gb.dmg.png": "ppu_scanline_bgp-DMG",
+            "ppu_scanline_bgp.gb.cgb.png": "ppu_scanline_bgp-CGB",
+            "speed_switch_timing_div.gbc.cgb.png": "speed_switch_timing_div",
+            "speed_switch_timing_ly.gbc.cgb.png": "speed_switch_timing_ly",
+            "speed_switch_timing_stat.gbc.cgb.png": "speed_switch_timing_stat",
+            "stop_instr.gb.dmg.png": "stop_instr-DMG",
+            "stop_instr.gb.cgb.png": "stop_instr-CGB",
+            "stop_instr_gbc_mode3.gb.cgb.png": "stop_instr_gbc_mode3",
+        }
+        return junit_status(statuses, "tests.test_daid", f"test_daid_image[{daid_ids.get(path.name)}]")
+    if suite_name == "GB Printer":
+        return junit_status(statuses, "tests.test_printer", "test_printer_rom")
+    if suite_name == "Mealybug":
+        is_cgb = path.name.endswith(".cgb.png")
+        rom = path.name.removesuffix(".cgb.png" if is_cgb else ".dmg.png")
+        return junit_status(statuses, "tests.test_mealybug", f"test_mealybug[{rom}-{'CGB' if is_cgb else 'DMG'}]")
+    return "Not run"
+
+
+def load_image_suites(statuses):
+    suites = {}
+    for path in sorted(RESULTS_DIR.rglob("*.png")):
+        suite_name = image_suite_name(path)
+        if suite_name in EXCLUDED_IMAGE_SUITES:
+            continue
+        # The Mealybug suite is listed from the JUnit results instead, so
+        # the skipped subtests are not reduced to their stale images
+        if suite_name == "Mealybug":
+            continue
+        relative = path.relative_to(RESULTS_DIR)
+        if suite_name not in suites:
+            result_location = path.parent if len(relative.parts) > 1 else RESULTS_DIR
+            suites[suite_name] = {
+                "results": [],
+                "url": github_results_directory_url(result_location),
+            }
+        target = IMAGE_OUTPUT / safe_image_name(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+        suites[suite_name]["results"].append(
+            (relative.as_posix(), target.name, image_test_status(path, suite_name, statuses))
+        )
+    return [{"name": name, "results": suite["results"], "url": suite["url"]} for name, suite in sorted(suites.items())]
+
+
+def suite_counts(suite):
+    passed = sum(result[-1] == "Passed" for result in suite["results"])
+    failed = sum(result[-1] == "Failed" for result in suite["results"])
+    skipped = sum(result[-1] == "Skipped" for result in suite["results"])
+    not_run = sum(result[-1] == "Not run" for result in suite["results"])
+    return len(suite["results"]), passed, failed, skipped, not_run
+
+
+def suite_anchor(name):
+    return "suite-" + re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def load_mealybug_suite(statuses, skips):
+    # The Mealybug suite is listed from the JUnit results so that every
+    # parametrized subtest shows up with its own name, mode and result --
+    # including the skipped ones, which never record an image
+    results = []
+    skip_reasons = {}
+    root = ElementTree.parse(JUNIT_XML).getroot()
+    for testcase in root.iter("testcase"):
+        if testcase.attrib.get("classname", "") != "tests.test_mealybug":
+            continue
+        name = testcase.attrib.get("name", "")
+        rom, _, mode = name[len("test_mealybug[") : -1].rpartition("-")
+        label = f"{rom} [{mode}]"
+        status = junit_status(statuses, "tests.test_mealybug", name)
+        image = None
+        source = RESULTS_DIR / "mealybug" / f"{rom}.{mode.lower()}.png"
+        if source.exists():
+            target = IMAGE_OUTPUT / safe_image_name(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            image = target.name
+        results.append((label, image, status))
+        reason = skips.get(("tests.test_mealybug", name))
+        if reason:
+            skip_reasons[label] = reason
+    return {
+        "name": "Mealybug",
+        "results": results,
+        "skip_reasons": skip_reasons,
+        "url": github_results_directory_url(RESULTS_DIR / "mealybug"),
+    }
+
+
+def render_result(text, status):
+    color = RESULT_COLORS.get(status)
+    if color is None:
+        return text
+    return f'<span style="color: {color}; font-weight: bold">{text}</span>'
+
+
+def render_json_suite(suite):
+    if any(image for _, image, _ in suite["results"]):
+        return render_image_suite(suite)
+    lines = [
+        f'<details id="{suite_anchor(suite["name"])}">',
+        f"<summary>{suite['name']} cases</summary>",
+        "",
+        github_links_line(suite),
+        "",
+        "| Case | Result |",
+        "| --- | --- |",
+    ]
+    lines.extend(f"| `{case}` | {render_result(status, status)} |" for case, _, status in suite["results"])
+    lines.extend(("</details>", ""))
+    return lines
+
+
+def render_image_suite(suite):
+    lines = [
+        f'<details id="{suite_anchor(suite["name"])}">',
+        f"<summary>{suite['name']}</summary>",
+        "",
+        github_links_line(suite),
+        "",
+    ]
+    for case, target, status in suite["results"]:
+        lines.extend(
+            (
+                # Headings are avoided here: they would raise the MyST
+                # non-consecutive header level warning inside the details block
+                f"**`{case}`**",
+                "",
+                f"**Result:** {render_result(status, status)}",
+                "",
+                f"```{{image}} assets/test-results/{target}",
+                f":alt: Recorded result for {case}",
+                ":width: 320px",
+                ":class: pixelated",
+                "```",
+                "",
+            )
+        )
+    lines.extend(("</details>", ""))
+    return lines
+
+
+def render_mealybug_suite(suite):
+    lines = [
+        f'<details id="{suite_anchor(suite["name"])}">',
+        f"<summary>{suite['name']}</summary>",
+        "",
+        github_links_line(suite),
+        "",
+        "Each subtest names its ROM and the hardware mode it runs in. A recorded",
+        "image exists for the subtests that render; the skipped ones state their",
+        "reason instead.",
+        "",
+    ]
+    for case, image, status in suite["results"]:
+        rom, _, mode = case.rpartition(" [")
+        mode = mode[:-1] if mode.endswith("]") else mode
+        lines.extend((f"**`{rom}`** [{mode}]", "", f"**Result:** {render_result(status, status)}", ""))
+        if image is not None:
+            lines.extend(
+                (
+                    f"```{{image}} assets/test-results/{image}",
+                    f":alt: Recorded result for {case}",
+                    ":width: 320px",
+                    ":class: pixelated",
+                    "```",
+                    "",
+                )
+            )
+        else:
+            reason = suite["skip_reasons"].get(case)
+            if reason:
+                lines.extend((f"Skipped: {reason}", ""))
+            else:
+                lines.extend(("No recorded image", ""))
+    lines.extend(("</details>", ""))
+    return lines
+
+
+def main():
+    statuses = load_junit_statuses(JUNIT_XML)
+    skips = load_junit_skips(JUNIT_XML)
+    json_suites = [
+        load_json_suite("Blargg", RESULTS_DIR / "blargg.json", statuses, blargg_test_status),
+        load_json_suite("SameSuite", RESULTS_DIR / "samesuite.json", statuses, samesuite_test_status),
+        load_json_suite("Mooneye", RESULTS_DIR / "mooneye" / "results.json", statuses, mooneye_test_status),
+        load_json_suite(
+            "RTC3Test",
+            RESULTS_DIR / "rtc3test.json",
+            statuses,
+            rtc3test_status,
+            image_for=lambda case: RESULTS_DIR / "rtc3test" / f"subtest_{case}.png",
+        ),
+        load_json_suite(
+            "which",
+            RESULTS_DIR / "which.json",
+            statuses,
+            which_test_status,
+            image_for=lambda case: RESULTS_DIR / "which" / f"{case}.png",
+        ),
+    ]
+    image_suites = load_image_suites(statuses)
+    suites = json_suites + image_suites
+    # Show Mealybug as the fourth suite, right after Mooneye, instead of its
+    # alphabetical position among the image suites. It is built from the JUnit
+    # results so that every subtest is listed, with or without an image
+    mealybug = load_mealybug_suite(statuses, skips)
+    mooneye_index = next((i for i, s in enumerate(suites) if s["name"] == "Mooneye"), None)
+    if mooneye_index is not None:
+        suites.insert(mooneye_index + 1, mealybug)
+    else:
+        suites.append(mealybug)
+
+    lines = [
+        "# Test results",
+        "",
+        "This page is generated from the recorded results in "
+        "`tests/test_results/` and the latest pytest JUnit XML output. "
+        "It is regenerated as part of `make docs`.",
+        "",
+        "Suite names in the overview table jump to the matching section "
+        "below, which links to the corresponding result files or directories "
+        "and the pytest module on GitHub.",
+        "",
+        "| Test suite | Cases | Passed | Failed |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for suite in suites:
+        total, passed, failed, _, _ = suite_counts(suite)
+        lines.append(
+            # Raw HTML anchor: a Markdown link to #suite-... would be treated as a
+            # MyST cross-reference and fail the docs build with myst.xref_missing
+            f"| <a href=\"#{suite_anchor(suite['name'])}\">{suite['name']}</a> | {total} | "
+            f"{render_result(passed, 'Passed')} | {render_result(failed, 'Failed')} |"
+        )
+    lines.extend(
+        (
+            "",
+            "Statuses come directly from the latest pytest JUnit XML. "
+            "Expected failures are shown as failed, while skipped and missing "
+            "cases remain distinguishable.",
+            "",
+            "<script>",
+            'document.addEventListener("DOMContentLoaded", function () {',
+            "    function openAnchorTarget() {",
+            "        var element = document.getElementById(window.location.hash.slice(1));",
+            '        if (element && element.tagName === "DETAILS") {',
+            "            element.open = true;",
+            "        }",
+            "    }",
+            '    window.addEventListener("hashchange", openAnchorTarget);',
+            "    openAnchorTarget();",
+            "});",
+            "</script>",
+            "",
+        )
+    )
+    json_suite_names = {suite["name"] for suite in json_suites}
+    for suite in suites:
+        if suite["name"] == "Mealybug":
+            lines.extend(render_mealybug_suite(suite))
+        elif suite["name"] in json_suite_names:
+            lines.extend(render_json_suite(suite))
+        else:
+            lines.extend(render_image_suite(suite))
+
+    OUTPUT.write_text("\n".join(lines) + "\n")
+
+
+if __name__ == "__main__":
+    main()

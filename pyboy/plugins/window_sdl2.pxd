@@ -3,36 +3,48 @@
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
 
-from . cimport sdl2
-from pyboy.plugins.base_plugin cimport PyBoyWindowPlugin
 cimport pyboy.utils
-
+from pyboy.plugins.base_plugin cimport PyBoyWindowPlugin
+from pyboy.core.mb cimport Motherboard
 import cython
-cimport cython
-from libc.stdint cimport uint8_t, uint16_t, int16_t, uint32_t
 
+cimport cython
+from libc.stdint cimport int8_t, int64_t
+
+from pyboy.logging.logging cimport Logger
+
+
+cdef Logger logger
 
 cdef int ROWS, COLS
 
-cdef sdl2.SDL_GameController *_sdlcontroller = NULL
+cdef object _sdlcontroller
 
 cpdef list sdl2_event_pump(list)
 
 
 cdef class WindowSDL2(PyBoyWindowPlugin):
 
-    cdef float _ftime
     cdef dict _key_down
     cdef dict _key_up
 
-    cdef sdl2.SDL_Window *_window
-    cdef sdl2.SDL_Renderer *_sdlrenderer
-    cdef sdl2.SDL_Texture *_sdltexturebuffer
+    cdef object _window
+    cdef object _sdlrenderer
+    cdef object _sdltexturebuffer
 
-    @cython.locals(now=float, delay=cython.int)
-    cdef bint frame_limiter(self, int)
+    cdef int64_t sound_device
+    cdef object audiobuffer_p
+    cdef int8_t[:] mixingbuffer
+    cdef object mixingbuffer_p
+    cdef object spec_want, spec_have
+    cdef readonly bint sgb_border_enabled
 
-    cdef inline void _update_display(self):
-        sdl2.SDL_UpdateTexture(self._sdltexturebuffer, NULL, self.renderer._screenbuffer_raw.data.as_voidptr, 160*4)
-        sdl2.SDL_RenderCopy(self._sdlrenderer, self._sdltexturebuffer, NULL, NULL)
-        sdl2.SDL_RenderPresent(self._sdlrenderer)
+    cpdef void _initialize_video_audio(self, object) except *
+    cdef void init_audio(self, Motherboard) noexcept
+    cpdef void _post_audio(self) except *
+
+    @cython.locals(queued_bytes=int, frames_buffered=cython.double)
+    cdef cython.double _get_sound_frames_buffered(self) noexcept
+
+    @cython.locals(queued_bytes=int)
+    cpdef void post_tick(self) except *

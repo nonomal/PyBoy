@@ -3,13 +3,6 @@
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
 
-__pdoc__ = {
-    "core": False,
-    "logger": False,
-    "pyboy": False,
-    "utils": False,
-}
-__all__ = ["PyBoy", "WindowEvent"]
+__all__ = ["PyBoy", "PyBoyMemoryView", "PyBoyRegisterFile"]
 
-from .pyboy import PyBoy
-from .utils import WindowEvent
+from .pyboy import PyBoy, PyBoyMemoryView, PyBoyRegisterFile

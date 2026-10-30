@@ -7,13 +7,14 @@ import base64
 import hashlib
 import io
 import json
-import logging
 import zlib
 
 import numpy as np
+
+import pyboy
 from pyboy.plugins.base_plugin import PyBoyPlugin
 
-logger = logging.getLogger(__name__)
+logger = pyboy.logging.get_logger(__name__)
 
 
 class RecordReplay(PyBoyPlugin):
@@ -37,18 +38,20 @@ class RecordReplay(PyBoyPlugin):
     def handle_events(self, events):
         # Input recorder
         if len(events) != 0:
-            self.recorded_input.append((
-                self.pyboy.frame_count, [e.event for e in events],
-                base64.b64encode(np.ascontiguousarray(self.pyboy.botsupport_manager().screen().screen_ndarray())
-                                ).decode("utf8")
-            ))
+            self.recorded_input.append(
+                (
+                    self.pyboy.frame_count,
+                    [int(e) for e in events],
+                    base64.b64encode(np.ascontiguousarray(self.pyboy.screen.ndarray[:, :, :-1])).decode("utf8"),
+                )
+            )
         return events
 
     def stop(self):
         save_replay(
-            self.pyboy.gamerom_file,
+            self.pyboy.gamerom,
             self.pyboy_argv.get("loadstate"),
-            self.pyboy.gamerom_file + ".replay",
+            self.pyboy.gamerom + ".replay",
             self.recorded_input,
         )
 

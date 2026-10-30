@@ -3,11 +3,11 @@
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
 
-import logging
+import pyboy
 
 from .base_mbc import BaseMBC
 
-logger = logging.getLogger(__name__)
+logger = pyboy.logging.get_logger(__name__)
 
 
 class MBC1(BaseMBC):
@@ -15,6 +15,12 @@ class MBC1(BaseMBC):
         super().__init__(*args, **kwargs)
         self.bank_select_register1 = 1
         self.bank_select_register2 = 0
+        # MBC1 multicarts repeat the Nintendo logo in every 16 KiB bank.
+        self.multicart = self.external_rom_count == 64 and all(
+            self.rombanks[bank, address] == self.rombanks[0, address]
+            for bank in range(1, self.external_rom_count)
+            for address in range(0x0104, 0x0134)
+        )
 
     def setitem(self, address, value):
         if 0x0000 <= address < 0x2000:
@@ -31,45 +37,44 @@ class MBC1(BaseMBC):
         elif 0x6000 <= address < 0x8000:
             self.memorymodel = value & 0b1
         elif 0xA000 <= address < 0xC000:
-            if self.rambanks is None:
-                logger.warning(
-                    "Game tries to set value 0x%0.2x at RAM address 0x%0.4x, but RAM "
-                    "banks are not initialized. Initializing %d RAM banks as "
-                    "precaution" % (value, address, self.external_ram_count)
-                )
-                self.init_rambanks(self.external_ram_count)
-
             if self.rambank_enabled:
                 self.rambank_selected = self.bank_select_register2 if self.memorymodel == 1 else 0
-                self.rambanks[self.rambank_selected % self.external_ram_count][address - 0xA000] = value
+                self.rambanks[self.rambank_selected % self.external_ram_count, address - 0xA000] = value
+        # else:
+        #     logger.error("Invalid writing address: %0.4x", address)
+        if self.memorymodel == 1:
+            bank_shift = 4 if self.multicart else 5
+            self.rombank_selected_low = (self.bank_select_register2 << bank_shift) % self.external_rom_count
+            if self.external_ram_count:
+                self.rambank_selected = self.bank_select_register2 % self.external_ram_count
         else:
-            logger.error("Invalid writing address: %s" % hex(address))
+            self.rombank_selected_low = 0
+            self.rambank_selected = 0
+        if self.multicart:
+            self.rombank_selected = (self.bank_select_register2 << 4) | (self.bank_select_register1 & 0x0F)
+            if self.bank_select_register1 & 0x0F == 0 and not self.bank_select_register1 & 0x10:
+                self.rombank_selected |= 1
+            self.rombank_selected %= self.external_rom_count
+        else:
+            self.rombank_selected = (
+                (self.bank_select_register2 << 5) | self.bank_select_register1
+            ) % self.external_rom_count
 
     def getitem(self, address):
-        if 0x0000 <= address < 0x4000:
-            if self.memorymodel == 1:
-                self.rombank_selected = (self.bank_select_register2 << 5) % self.external_rom_count
-            else:
-                self.rombank_selected = 0
-            return self.rombanks[self.rombank_selected][address]
-        elif 0x4000 <= address < 0x8000:
-            self.rombank_selected = \
-                    (self.bank_select_register2 << 5) % self.external_rom_count | self.bank_select_register1
-            return self.rombanks[self.rombank_selected % len(self.rombanks)][address - 0x4000]
-        elif 0xA000 <= address < 0xC000:
+        if 0xA000 <= address < 0xC000:
             if not self.rambank_initialized:
-                logger.error("RAM banks not initialized: %s" % hex(address))
+                logger.warning("RAM banks not initialized: %0.4x", address)
 
             if not self.rambank_enabled:
                 return 0xFF
 
             if self.memorymodel == 1:
-                self.rambank_selected = self.bank_select_register2
+                self.rambank_selected = self.bank_select_register2 % self.external_ram_count
             else:
                 self.rambank_selected = 0
-            return self.rambanks[self.rambank_selected % self.external_ram_count][address - 0xA000]
-        else:
-            logger.error("Reading address invalid: %s" % address)
+            return self.rambanks[self.rambank_selected, address - 0xA000]
+        # else:
+        #     logger.error("Reading address invalid: %0.4x", address)
 
     def save_state(self, f):
         # Cython doesn't like super()
@@ -86,4 +91,7 @@ class MBC1(BaseMBC):
         else:
             self.bank_select_register1 = self.rombank_selected & 0b00011111
             self.bank_select_register2 = (self.rombank_selected & 0b01100000) >> 5
-            self.rambank_selected = self.bank_select_register2
+        if self.memorymodel == 1 and self.external_ram_count:
+            self.rambank_selected = self.bank_select_register2 % self.external_ram_count
+        else:
+            self.rambank_selected = 0

@@ -3,34 +3,57 @@
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
 
-import logging
-
 import numpy as np
-from pyboy.plugins.base_plugin import PyBoyWindowPlugin
-from pyboy.utils import WindowEvent
 
-logger = logging.getLogger(__name__)
+import pyboy
+from pyboy.plugins.window_openal import WindowOpenAL
+from pyboy.utils import WindowEvent, PyBoyException, PyBoyDependencyError
 
+logger = pyboy.logging.get_logger(__name__)
+
+# isort: skip_file
 try:
     import OpenGL.GLUT.freeglut
     from OpenGL.GL import (
-        GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, glClear, glDrawPixels, glFlush,
-        glPixelZoom
+        GL_COLOR_BUFFER_BIT,
+        GL_DEPTH_BUFFER_BIT,
+        GL_RGBA,
+        GL_UNSIGNED_INT_8_8_8_8_REV,
+        glClear,
+        glDrawPixels,
+        glFlush,
+        glPixelZoom,
     )
-    # from OpenGL.GLU import *
     from OpenGL.GLUT import (
-        GLUT_KEY_DOWN, GLUT_KEY_LEFT, GLUT_KEY_RIGHT, GLUT_KEY_UP, GLUT_RGBA, GLUT_SINGLE, glutCreateWindow,
-        glutDestroyWindow, glutDisplayFunc, glutGetWindow, glutInit, glutInitDisplayMode, glutInitWindowSize,
-        glutKeyboardFunc, glutKeyboardUpFunc, glutReshapeFunc, glutSetWindowTitle, glutSpecialFunc, glutSpecialUpFunc
+        GLUT_KEY_DOWN,
+        GLUT_KEY_LEFT,
+        GLUT_KEY_RIGHT,
+        GLUT_KEY_UP,
+        GLUT_RGBA,
+        GLUT_SINGLE,
+        glutCreateWindow,
+        glutDestroyWindow,
+        glutDisplayFunc,
+        glutGetWindow,
+        glutInit,
+        glutInitDisplayMode,
+        glutInitWindowSize,
+        glutKeyboardFunc,
+        glutKeyboardUpFunc,
+        glutReshapeFunc,
+        glutSetWindowTitle,
+        glutSpecialFunc,
+        glutSpecialUpFunc,
     )
+
     opengl_enabled = True
-except ImportError:
+except (ImportError, AttributeError):
     opengl_enabled = False
 
 ROWS, COLS = 144, 160
 
 
-class WindowOpenGL(PyBoyWindowPlugin):
+class WindowOpenGL(WindowOpenAL):
     def __init__(self, pyboy, mb, pyboy_argv):
         super().__init__(pyboy, mb, pyboy_argv)
 
@@ -38,10 +61,11 @@ class WindowOpenGL(PyBoyWindowPlugin):
             return
 
         if not glutInit():
-            raise Exception("OpenGL couldn't initialize!")
+            raise PyBoyException("OpenGL couldn't initialize!")
         glutInitDisplayMode(GLUT_SINGLE | GLUT_RGBA)
         glutInitWindowSize(*self._scaledresolution)
-        glutCreateWindow("PyBoy")
+        if not glutCreateWindow("PyBoy"):
+            raise PyBoyException("OpenGL couldn't open window!")
         glutKeyboardFunc(self._key)
         glutKeyboardUpFunc(self._keyUp)
         glutSpecialFunc(self._spec)
@@ -111,17 +135,23 @@ class WindowOpenGL(PyBoyWindowPlugin):
                 self.events.append(WindowEvent(WindowEvent.RELEASE_BUTTON_START))
             elif c == "o":
                 self.events.append(WindowEvent(WindowEvent.SCREENSHOT_RECORD))
+            elif c == "c":
+                self.events.append(WindowEvent(WindowEvent.CYCLE_PALETTE))
         else:
             if c == "a":
                 self.events.append(WindowEvent(WindowEvent.PRESS_BUTTON_A))
             elif c == "s":
                 self.events.append(WindowEvent(WindowEvent.PRESS_BUTTON_B))
+            elif c == "p":
+                self.events.append(WindowEvent(WindowEvent.PAUSE_TOGGLE))
             elif c == chr(27):
                 self.events.append(WindowEvent(WindowEvent.QUIT))
             elif c == " ":
                 self.events.append(WindowEvent(WindowEvent.PRESS_SPEED_UP))
             elif c == "i":
                 self.events.append(WindowEvent(WindowEvent.SCREEN_RECORDING_TOGGLE))
+            elif c == "u":
+                self.events.append(WindowEvent(WindowEvent.SCREEN_RECORDING_TOGGLE_MP4))
             elif c == chr(8):
                 self.events.append(WindowEvent(WindowEvent.PRESS_BUTTON_SELECT))
             elif c == chr(13):
@@ -136,22 +166,26 @@ class WindowOpenGL(PyBoyWindowPlugin):
     def _gldraw(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         buf = np.asarray(self.renderer._screenbuffer)[::-1, :]
-        glDrawPixels(COLS, ROWS, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, buf)
+        glDrawPixels(COLS, ROWS, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, buf)
         glFlush()
 
     def enabled(self):
-        if self.pyboy_argv.get("window_type") == "OpenGL":
+        if self.pyboy_argv.get("window") == "OpenGL":
             if opengl_enabled:
-                return True
+                if bool(OpenGL.GLUT.freeglut.glutMainLoopEvent):
+                    return True
+                else:
+                    raise PyBoyException('Failed to load "PyOpenGL"')
             else:
-                logger.error("Missing depencency \"PyOpenGL\". OpenGL window disabled")
+                raise PyBoyDependencyError('Missing depencency "PyOpenGL"')
         return False
 
     def post_tick(self):
         self._gldraw()
         OpenGL.GLUT.freeglut.glutMainLoopEvent()
+        WindowOpenAL.post_tick(self)
 
     def stop(self):
         glutDestroyWindow(glutGetWindow())
-        for _ in range(10): # At least 2 to close
+        for _ in range(10):  # At least 2 to close
             OpenGL.GLUT.freeglut.glutMainLoopEvent()

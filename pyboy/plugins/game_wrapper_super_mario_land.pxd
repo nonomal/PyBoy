@@ -2,22 +2,25 @@
 # License: See LICENSE.md file
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
-from libc.stdint cimport uint8_t
-from pyboy.plugins.base_plugin cimport PyBoyGameWrapper
 cimport cython
+from libc.stdint cimport uint8_t
 
-cdef int ROWS, COLS
+from pyboy.logging.logging cimport Logger
+from pyboy.plugins.base_plugin cimport PyBoyGameWrapper
+
+
+cdef Logger logger
+
+cdef int TILES
 
 
 cdef class GameWrapperSuperMarioLand(PyBoyGameWrapper):
-    cdef public tuple world
-    cdef public int coins
-    cdef public int lives_left
-    cdef public int score
-    cdef public int time_left
-    cdef public int level_progress
-    cdef public int _level_progress_max
-    cdef public int fitness
+    cdef readonly tuple world
+    cdef readonly int coins
+    cdef readonly int lives_left
+    cdef readonly int score
+    cdef readonly int time_left
+    cdef readonly int level_progress
 
-    cpdef void start_game(self, timer_div=*, world_level=*, unlock_level_select=*)
-    cpdef void reset_game(self, timer_div=*)
+    cpdef void start_game(self, timer_div=*, world_level=*, unlock_level_select=*) except *
+    cpdef void set_lives_left(self, int) noexcept

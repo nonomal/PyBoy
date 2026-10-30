@@ -3,77 +3,74 @@
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
 
-import logging
 from array import array
+
+import pyboy
+from pyboy.utils import PyBoyException
 
 from .base_mbc import ROMOnly
 from .mbc1 import MBC1
 from .mbc2 import MBC2
-from .mbc3 import MBC3
+from .mbc3 import MBC3, MBC30
 from .mbc5 import MBC5
 
-logger = logging.getLogger(__name__)
-
-try:
-    from cython import compiled
-    cythonmode = compiled
-except ImportError:
-    cythonmode = False
+logger = pyboy.logging.get_logger(__name__)
 
 
-def load_cartridge(filename):
-    rombanks = load_romfile(filename)
+def load_cartridge(gamerom_file, ram_file, rtc_file):
+    rombanks = load_romfile(gamerom_file)
     if not validate_checksum(rombanks):
-        raise Exception("Cartridge header checksum mismatch!")
+        raise PyBoyException("Cartridge header checksum mismatch!")
 
     # WARN: The following table doesn't work for MBC2! See Pan Docs
-    external_ram_count = int(EXTERNAL_RAM_TABLE[rombanks[0][0x0149]])
+    external_ram_count = int(EXTERNAL_RAM_TABLE[rombanks[0, 0x0149]])
 
-    carttype = rombanks[0][0x0147]
+    carttype = rombanks[0, 0x0147]
     cartinfo = CARTRIDGE_TABLE.get(carttype, None)
     if cartinfo is None:
-        raise Exception("Catridge type invalid: %s" % carttype)
+        raise PyBoyException("Catridge type invalid: %s" % carttype)
 
-    cartdata = (
-        carttype, cartinfo[0].__name__, ", ".join([x for x, y in zip(["SRAM", "Battery", "RTC"], cartinfo[1:]) if y])
-    )
-    logger.info("Cartridge type: 0x%0.2x - %s, %s" % cartdata)
-    logger.info("Cartridge size: %d ROM banks of 16KB, %s RAM banks of 8KB" % (len(rombanks), external_ram_count))
-    cartmeta = CARTRIDGE_TABLE[carttype]
+    mbc_class = cartinfo[0]
+    if mbc_class is MBC3 and (external_ram_count > 4 or len(rombanks) > 128):
+        # MBC30 (e.g. Japanese Pokémon Crystal) shares cartridge type codes
+        # with MBC3, but supports 8 RAM banks and 256 ROM banks. It can only
+        # be told apart by the ROM/RAM sizes in the header.
+        mbc_class = MBC30
 
-    return cartmeta[0](filename, rombanks, external_ram_count, carttype, *cartmeta[1:])
+    cart_line = ", ".join([x for x, y in zip(["SRAM", "Battery", "RTC"], cartinfo[1:]) if y])
+    cart_name = mbc_class.__name__
+    logger.debug(f"Cartridge type: 0x{carttype:02x} - {cart_name}, {cart_line}")
+    logger.debug(f"Cartridge size: {len(rombanks)} ROM banks of 16KB, {external_ram_count} RAM banks of 8KB")
+
+    return mbc_class(rombanks, ram_file, rtc_file, external_ram_count, carttype, *cartinfo[1:])
 
 
 def validate_checksum(rombanks):
     x = 0
     for m in range(0x134, 0x14D):
-        x = x - rombanks[0][m] - 1
-        x &= 0xff
-    return rombanks[0][0x14D] == x
+        x = x - rombanks[0, m] - 1
+        x &= 0xFF
+    return rombanks[0, 0x14D] == x
 
 
-def load_romfile(filename):
-    with open(filename, "rb") as romfile:
-        romdata = array("B", romfile.read())
+def load_romfile(gamerom_file):
+    romdata = array("B", gamerom_file.read())
 
-    logger.debug(f"Loading ROM file: {len(romdata)} bytes")
+    logger.debug("Loading ROM file: %d bytes", len(romdata))
     if len(romdata) == 0:
-        logger.error("ROM file is empty!")
-        raise Exception("Empty ROM file")
+        logger.critical("ROM file is empty!")
+        raise PyBoyException("Empty ROM file")
 
     banksize = 16 * 1024
     if len(romdata) % banksize != 0:
-        logger.error("Unexpected ROM file length")
-        raise Exception("Bad ROM file size")
+        raise PyBoyException(
+            f"Unexpected ROM file length! ROM data of {len(romdata)} doesn't divide evenly into bank size {banksize}"
+        )
 
-    if cythonmode:
-        return memoryview(romdata).cast("B", shape=(len(romdata) // banksize, banksize))
-    else:
-        v = memoryview(romdata)
-        return [v[i:i + banksize] for i in range(0, len(romdata), banksize)]
+    return memoryview(romdata).cast("B", shape=(len(romdata) // banksize, banksize))
 
 
-# yapf: disable
+# fmt: off
 CARTRIDGE_TABLE = {
     #      MBC     , SRAM  , Battery , RTC
     0x00: (ROMOnly , False , False   , False) , # ROM
@@ -96,12 +93,12 @@ CARTRIDGE_TABLE = {
     0x1D: (MBC5    , True  , False   , False) , # MBC5+RUMBLE+RAM
     0x1E: (MBC5    , True  , True    , False) , # MBC5+RUMBLE+RAM+BATT
 }
-# yapf: enable
+# fmt: on
 
 # Number of external 8KB banks in the cartridge. Taken from Pan Docs
 EXTERNAL_RAM_TABLE = {
-    0x00: 1, # We wrongfully allocate some RAM, to help Cython
-    0x01: 1, # Only supposed to be 2KB, but we allocate 8KB.
+    0x00: 1,  # We wrongfully allocate some RAM, to help Cython
+    0x01: 1,  # Only supposed to be 2KB, but we allocate 8KB.
     0x02: 1,
     0x03: 4,
     0x04: 16,

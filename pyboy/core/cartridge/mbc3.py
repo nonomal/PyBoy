@@ -3,11 +3,11 @@
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
 
-import logging
+import pyboy
 
 from .base_mbc import BaseMBC
 
-logger = logging.getLogger(__name__)
+logger = pyboy.logging.get_logger(__name__)
 
 
 class MBC3(BaseMBC):
@@ -22,28 +22,66 @@ class MBC3(BaseMBC):
                 # lower 4 bits enables RAM, and any other value
                 # disables RAM."
                 self.rambank_enabled = False
-                logger.warning("Unexpected command for MBC3: Address: 0x%0.4x, Value: 0x%0.2x" % (address, value))
+                # logger.debug("Unexpected command for MBC3: Address: 0x%0.4x, Value: 0x%0.2x", address, value)
         elif 0x2000 <= address < 0x4000:
             value &= 0b01111111
             if value == 0:
                 value = 1
-            self.rombank_selected = value
+            self.rombank_selected = value % self.external_rom_count
         elif 0x4000 <= address < 0x6000:
-            self.rambank_selected = value
+            # The MBC3 RAM bank register is 4 bits wide. Bank values $08-$0C
+            # select the RTC registers at access time, and $04-$07 and $0D-$0F
+            # select no RAM at all (open bus). Bank numbers beyond the
+            # cartridge's RAM size mirror into the available banks.
+            value &= 0x0F
+            if value < 0x04:
+                self.rambank_selected = value % self.external_ram_count
+            else:
+                self.rambank_selected = value
         elif 0x6000 <= address < 0x8000:
             if self.rtc_enabled:
                 self.rtc.writecommand(value)
-            else:
-                # NOTE: Pokemon Red/Blue will do this, but it can safely be ignored:
-                # https://github.com/pret/pokered/issues/155
-                logger.warning("RTC not present. Game tried to issue RTC command: 0x%0.4x, 0x%0.2x" % (address, value))
+            # else:
+            #     # NOTE: Pokemon Red/Blue will do this, but it can safely be ignored:
+            #     # https://github.com/pret/pokered/issues/155
+            #     logger.debug("RTC not present. Game tried to issue RTC command: 0x%0.4x, 0x%0.2x", address, value)
         elif 0xA000 <= address < 0xC000:
             if self.rambank_enabled:
-                if self.rambank_selected <= 0x03:
-                    self.rambanks[self.rambank_selected][address - 0xA000] = value
-                elif 0x08 <= self.rambank_selected <= 0x0C:
+                if self.rtc_enabled and 0x08 <= self.rambank_selected <= 0x0C:
                     self.rtc.setregister(self.rambank_selected, value)
-                else:
-                    logger.error("Invalid RAM bank selected: 0x%0.2x" % self.rambank_selected)
+                elif self.rambank_selected < self.external_ram_count:
+                    self.rambanks[self.rambank_selected, address - 0xA000] = value
+                # else:
+                #     logger.error("Invalid RAM bank selected: 0x%0.2x", self.rambank_selected)
+        # else:
+        #     logger.error("Invalid writing address: 0x%0.4x", address)
+
+
+class MBC30(MBC3):
+    # MBC30 (Japanese Pokémon Crystal) is an MBC3 variant with an 8-bit ROM
+    # bank register (256 banks) and 8 external RAM banks instead of 4. RTC
+    # register selects (0x08-0x0C) don't collide with the extra RAM banks.
+    def setitem(self, address, value):
+        if 0x2000 <= address < 0x4000:
+            # MBC30 uses the full 8-bit value for the ROM bank register
+            # (256 banks), unlike MBC3 which masks to 7 bits (128 banks).
+            if value == 0:
+                value = 1
+            self.rombank_selected = value % self.external_rom_count
+        elif 0x4000 <= address < 0x6000:
+            # MBC30 supports 8 RAM banks instead of MBC3's 4
+            value &= 0x0F
+            if value < 0x08:
+                self.rambank_selected = value % self.external_ram_count
+            else:
+                self.rambank_selected = value
+        elif 0xA000 <= address < 0xC000:
+            if self.rambank_enabled:
+                if self.rambank_selected <= 0x07:
+                    self.rambanks[self.rambank_selected, address - 0xA000] = value
+                elif self.rtc_enabled and 0x08 <= self.rambank_selected <= 0x0C:
+                    self.rtc.setregister(self.rambank_selected, value)
+                # else:
+                #     logger.error("Invalid RAM bank selected: 0x%0.2x", self.rambank_selected)
         else:
-            logger.error("Invalid writing address: 0x%0.4x" % address)
+            MBC3.setitem(self, address, value)

@@ -1,4 +1,4 @@
-name: PyTest PyBoy
+name: PyBoy
 
 on:
   push:
@@ -10,168 +10,305 @@ on:
 
 jobs:
   test_cython:
-    name: Cython - Build, Test and Deploy
+    name: Cython
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [[self-hosted, macOS], [self-hosted, linux], [self-hosted, windows, cpython]]
-        python-version: [3.7, 3.8, 3.9, "3.10"]
-        exclude:
-        # Gives the following error: /usr/bin/ld: cannot find -lpython3.7m
-        - os: [self-hosted, linux]
-          python-version: 3.7
+        os: [macos-latest, ubuntu-latest, windows-latest, ubuntu-24.04-arm]
+        python-version: ["3.10", 3.11, 3.12, 3.13, 3.14]
 
     steps:
-    - uses: actions/checkout@v2
-    - name: Set Unix env
-      if: ${{ !contains(matrix.os, 'windows') }}
-      run: |
-        echo "TEST_CI=1" >> $GITHUB_ENV
-        echo "TEST_NO_UI=1" >> $GITHUB_ENV
-    - name: Set AGENT_TOOLSDIRECTORY
-      if: ${{ contains(matrix.os, 'macOS') }}
-      run: |
-        echo "AGENT_TOOLSDIRECTORY=/Users/runner/hostedtoolcache" >> $GITHUB_ENV
-    - name: Set Windows env
-      if: ${{ contains(matrix.os, 'windows') }}
-      run: |
-        echo "PYSDL2_DLL_PATH=C:\SDL2\lib\x64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "TEST_CI=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "TEST_NO_UI=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    - uses: actions/checkout@v4
+    - name: Cache Ubuntu packages
+      if: ${{ contains(matrix.os, 'ubuntu') }}
+      uses: awalsh128/cache-apt-pkgs-action@v1
+      with:
+        packages: libopengl0 freeglut3-dev ffmpeg libogg-dev ccache
+        version: 1.0
+        execute_install_scripts: true
+    - name: CCache
+      if: ${{ matrix.os != 'windows-latest' }}
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        # create-symlink: true
+        key: ${{ matrix.os }}-${{ matrix.python-version }}
+        variant: ${{ contains(matrix.os, 'windows') && 'sccache' || 'ccache' }}
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+        cache: pip
+        cache-dependency-path: |
+          requirements.txt
+          requirements_tests.txt
     - name: Install Python dependencies
       run: |
-        pip install wheel
+        pip install --upgrade pip
+        pip install --upgrade wheel setuptools
+        pip install --prefer-binary -r requirements.txt
+        pip install --prefer-binary -r requirements_tests.txt
+    - name: Detect Clang version for PGO cache
+      id: pgo-clang
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease && contains(matrix.os, 'macos-latest') }}
+      run: |
+        echo "version=$(clang -dumpfullversion -dumpversion)" >> "$GITHUB_OUTPUT"
+    - name: Cache Clang PGO profile
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease && contains(matrix.os, 'macos-latest') }}
+      uses: actions/cache@v4
+      with:
+        path: .pgo/cache/clang
+        key: pgo-v2-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}-clang-${{ steps.pgo-clang.outputs.version }}-${{ hashFiles('pyboy/**/*.py', 'pyboy/**/*.pyx', 'pyboy/**/*.pxd', 'setup.py', 'pyproject.toml', 'Makefile', 'requirements.txt', 'requirements_tests.txt', 'tests/conftest.py', 'tests/test_pokemon_tas.py', '.github/workflows/pr-test.yml') }}
+    - name: Setup macOS
+      if: ${{ contains(matrix.os, 'macos-latest') }}
+      run: |
+        # Install 'timeout' command
+        brew install coreutils ffmpeg
+    - name: Build or reuse Clang PGO profile
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease && contains(matrix.os, 'macos-latest') }}
+      env:
+        PYTEST_SECRETS_KEY: ${{ secrets.PYTEST_SECRETS_KEY }}
+      run: |
+        make pgo PGO_ENGINE=clang PGO_PROFILE=.pgo/cache/clang/pyboy.profdata PGO_REUSE_PROFILE=1
+    - name: Setup Windows - ffmpeg
+      if: ${{ contains(matrix.os, 'windows-latest') }}
+      run: |
+        choco install ffmpeg -y
+    - name: Setup Windows - MSVC environment
+      if: ${{ matrix.os == 'windows-latest' }}
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+    - name: Configure Windows MSVC build
+      if: ${{ matrix.os == 'windows-latest' }}
+      shell: pwsh
+      run: |
+        Add-Content -Path $env:GITHUB_ENV -Value "DISTUTILS_USE_SDK=1"
     - name: Build PyBoy
+      env:
+        CC: "ccache gcc"
+        CXX: "ccache g++"
       run: |
-        python setup.py build_ext --inplace
+        python setup.py build_ext -j $(getconf _NPROCESSORS_ONLN) --inplace
     - name: Run PyTest
+      env:
+        PYTEST_SECRETS_KEY: ${{ secrets.PYTEST_SECRETS_KEY }}
+        TEST_VERBOSE_IMAGES: 0
+        TEST_NO_UI: 1
       run: |
-        python setup.py test
-    - name: Build and upload wheel
-      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !contains(matrix.os, 'linux') }}
+        ${{ ((matrix.os != 'windows-latest') && 'timeout 10m ') || ''}} python -m pytest tests/ pyboy/ docs/ -n auto -v --benchmark-disable
+    - name: Build wheel
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease && !contains(matrix.os, 'ubuntu') }}
+      env:
+        CC: "ccache gcc"
+        CXX: "ccache g++"
       run: |
-        echo "Building wheel and uploading"
+        echo "Building wheel"
         pip install wheel twine
         python setup.py sdist bdist_wheel
+    - name: Upload wheel
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease && !contains(matrix.os, 'ubuntu') }}
+      run: |
+        echo "Uploading wheel"
         python -m twine upload --non-interactive -u '__token__' -p ${{ secrets.PYPI_API_TOKEN }} dist/*.whl
         echo "Uploading source code"
         python -m twine upload --non-interactive --skip-existing -u '__token__' -p ${{ secrets.PYPI_API_TOKEN }} dist/*.tar.gz
+    - name: Upload wheel [TEST]
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && github.event.release.prerelease && !contains(matrix.os, 'ubuntu') }}
+      run: |
+        echo "Uploading wheel"
+        python -m twine upload --repository testpypi --non-interactive -u '__token__' -p ${{ secrets.PYPI_TEST_API_TOKEN }} dist/*.whl
+        echo "Uploading source code"
+        python -m twine upload --repository testpypi --non-interactive --skip-existing -u '__token__' -p ${{ secrets.PYPI_TEST_API_TOKEN }} dist/*.tar.gz
 
   test_pypy:
-    name: PyPy - Test
+    name: PyPy
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        os: [[self-hosted, macOS], [self-hosted, linux], [self-hosted, windows, pypy]]
-        python-version: ['pypy-3.6', 'pypy-3.7']
-        exclude:
-        # Not worth the time to fix:
-        # The headers or library files could not be found for zlib, a required dependency when compiling Pillow from source.
-        - os: [self-hosted, windows]
-          python-version: pypy-3.6
+        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm] # TODO: windows-latest broken on NumPy
+        python-version: ['pypy-3.11']
     steps:
-    - uses: actions/checkout@v2
-    - name: Set Unix env
-      if: ${{ !contains(matrix.os, 'windows') }}
+    - uses: actions/checkout@v4
+    - name: Setup macOS
+      if: ${{ contains(matrix.os, 'macos-latest') }}
       run: |
-        echo "TEST_CI=1" >> $GITHUB_ENV
-        echo "TEST_NO_UI=1" >> $GITHUB_ENV
-    - name: Set AGENT_TOOLSDIRECTORY
-      if: ${{ contains(matrix.os, 'macOS') }}
+        # Fix cryptography build: https://github.com/pyca/cryptography/issues/3489
+        # Install 'timeout' command
+        brew install openssl ffmpeg coreutils
+        echo "CPPFLAGS=-I/usr/local/opt/openssl/include" >> $GITHUB_ENV
+        echo "LDFLAGS=-L/usr/local/opt/openssl/lib" >> $GITHUB_ENV
+    - name: Setup Ubuntu - OpenGL dependencies
+      if: ${{ contains(matrix.os, 'ubuntu') }}
       run: |
-        echo "AGENT_TOOLSDIRECTORY=/Users/runner/hostedtoolcache" >> $GITHUB_ENV
-    - name: Set Windows env
-      if: ${{ contains(matrix.os, 'windows') }}
-      run: |
-        echo "PYSDL2_DLL_PATH=C:\SDL2\lib\x64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "TEST_CI=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "TEST_NO_UI=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        sudo apt update
+        sudo apt install libjpeg-dev libopengl0 freeglut3-dev ffmpeg libogg-dev -y
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+    - name: Cache PyPy pip downloads
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/pypy-pip-cache
+        key: pip-pypy-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'requirements_tests.txt') }}
+        restore-keys: |
+          pip-pypy-${{ runner.os }}-${{ matrix.python-version }}-
     - name: Install PyPy dependencies
+      env:
+        PIP_CACHE_DIR: ${{ runner.temp }}/pypy-pip-cache
       run: |
         pypy3 -m ensurepip
+        pypy3 -m pip install --upgrade pip
         pypy3 -m pip install wheel
-    - name: Fix Numpy Polyfit error
-      if: ${{ contains(matrix.os, 'macOS') }}
-      run: |
-        # Fix issue with NumPy and PolyFit: https://github.com/numpy/numpy/issues/15947
-        rm -vf ~/Library/Caches/pip/wheels/*/*/*/*/*numpy*
-        # brew install openblas
-        OPENBLAS="$(brew --prefix openblas)" pypy3 -m pip install numpy
+        pypy3 -m pip install --prefer-binary -r requirements.txt
+        pypy3 -m pip install --prefer-binary -r requirements_tests.txt
     - name: Run PyTest
+      env:
+        PYTEST_SECRETS_KEY: ${{ secrets.PYTEST_SECRETS_KEY }}
+        TEST_VERBOSE_IMAGES: 0
+        TEST_NO_UI: 1
       run: |
-        pypy3 setup.py test
+        ${{ ((matrix.os != 'windows-latest') && 'timeout 90m ') || ''}} pypy3 -m pytest tests/ pyboy/ docs/ -n auto -v --benchmark-disable
 
   test_manylinux:
-    name: ManyLinux - Build, Test and Deploy
-    runs-on: [self-hosted, linux]
+    name: ManyLinux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['cp36-cp36m', 'cp37-cp37m', 'cp38-cp38', 'cp39-cp39', 'cp310-cp310']
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        python-version: ['cp310-cp310', 'cp311-cp311', 'cp312-cp312', 'cp313-cp313', 'cp314-cp314']
+        manylinux-version: ['manylinux_2_28_x86_64', 'musllinux_1_2_x86_64', 'manylinux_2_28_aarch64', 'musllinux_1_2_aarch64']
+        exclude:
+          - os: ubuntu-24.04-arm
+            manylinux-version: manylinux_2_28_x86_64
+          - os: ubuntu-24.04-arm
+            manylinux-version: musllinux_1_2_x86_64
+          - os: ubuntu-latest
+            manylinux-version: manylinux_2_28_aarch64
+          - os: ubuntu-latest
+            manylinux-version: musllinux_1_2_aarch64
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+    - run: sudo apt update  # Only for Docker jobs
+    - name: CCache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ matrix.os }}-${{ matrix.manylinux-version }}-${{ matrix.python-version }}
+    - name: Cache ManyLinux pip downloads
+      uses: actions/cache@v4
+      with:
+        path: .pip-cache
+        key: pip-${{ runner.os }}-${{ matrix.manylinux-version }}-${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'requirements_tests.txt') }}
+        restore-keys: |
+          pip-${{ runner.os }}-${{ matrix.manylinux-version }}-${{ matrix.python-version }}-
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Build cached ManyLinux environment
+      uses: docker/build-push-action@v6
+      with:
+        context: .github/docker
+        file: .github/docker/manylinux.Dockerfile
+        build-args: |
+          BASE_IMAGE=quay.io/pypa/${{ matrix.manylinux-version }}:latest
+          MANYLINUX_VERSION=${{ matrix.manylinux-version }}
+        tags: pyboy-builder:${{ matrix.manylinux-version }}
+        load: true
+        cache-from: type=gha,scope=pyboy-${{ matrix.manylinux-version }}
+        # Only one matrix leg writes each image scope to avoid concurrent cache exports.
+        cache-to: ${{ matrix.python-version == 'cp314-cp314' && format('type=gha,scope=pyboy-{0},ignore-error=true', matrix.manylinux-version) || '' }}
+    - name: Detect GCC version for PGO cache
+      id: pgo-gcc
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease }}
+      run: |
+        version=$(docker run --rm --entrypoint /bin/sh quay.io/pypa/${{ matrix.manylinux-version }}:latest -c 'gcc -dumpfullversion -dumpversion')
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - name: Cache GCC PGO profile
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease }}
+      uses: actions/cache@v4
+      with:
+        path: .pgo/cache/gcc
+        key: pgo-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.manylinux-version }}-${{ matrix.python-version }}-gcc-${{ steps.pgo-gcc.outputs.version }}-${{ hashFiles('pyboy/**/*.py', 'pyboy/**/*.pyx', 'pyboy/**/*.pxd', 'setup.py', 'pyproject.toml', 'Makefile', 'requirements.txt', 'requirements_tests.txt', 'tests/conftest.py', 'tests/test_pokemon_tas.py', '.github/workflows/pr-test.yml') }}
     - name: Docker Run Action
       uses: addnab/docker-run-action@v3
+      env:
+        PYTEST_SECRETS_KEY: ${{ secrets.PYTEST_SECRETS_KEY }}
       with:
-        image: quay.io/pypa/manylinux2010_x86_64:latest
-        options: -v ${{ github.workspace }}:/work -e GITHUB_REF=${{ github.ref }} --rm
+        image: pyboy-builder:${{ matrix.manylinux-version }}
+        options: -v ${{ github.workspace }}:/work -v ${{ github.workspace }}/.ccache:/ccache -v ${{ github.workspace }}/.pip-cache:/pip-cache -e GITHUB_REF=${{ github.ref }} -e GITHUB_ACTIONS=true -e PYTEST_SECRETS_KEY --rm
         run: |
+          set -e
+
           echo "Linking Python version ${{ matrix.python-version }}"
           ln -s "/opt/python/${{ matrix.python-version }}/bin/python3" /usr/local/bin/python
 
-          echo "Installing SDL2"
-          yum -y install mercurial
-          bash -c "hg clone https://hg.libsdl.org/SDL SDL; cd SDL; mkdir build; cd build; ../configure; make; make install"
-          ln -s /usr/local/lib/libSDL2-2.0.so.0 /usr/lib64/libSDL2-2.0.so.0
+          export PIP_CACHE_DIR=/pip-cache
+          if [[ "${{ matrix.manylinux-version }}" == musllinux* ]]; then
+            python -m ensurepip
+          fi
+          ccache --set-config=cache_dir=/ccache
+          ccache --set-config=max_size=500M
+          ccache --set-config=compression=true
+          export CCACHE_DIR=/ccache
+          export CC="ccache gcc"
+          export CXX="ccache g++"
 
           cd /work
-          echo "Starting build"
-          python setup.py build_ext --inplace
+          echo "Preparing pip"
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade setuptools
 
           echo "Starting tests"
-          TEST_CI=1 TEST_NO_UI=1 python setup.py test
+          python -m pip install --prefer-binary -r requirements.txt
+          python -m pip install --prefer-binary -r requirements_tests.txt
 
-          echo "Building wheel"
-          python -m pip install wheel
-          python setup.py sdist bdist_wheel
+          if [[ "${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease }}" == "true" ]]; then
+            echo "Building or reusing GCC PGO profile"
+            make pgo PY=python ROOT_DIR=/work PGO_ENGINE=gcc PGO_GCC_PROFILE_DIR=.pgo/cache/gcc PGO_REUSE_PROFILE=1
+          fi
 
-          python -m pip install auditwheel
-          auditwheel repair dist/*.whl
+          echo "Building PyBoy"
+          python setup.py build_ext -j $(getconf _NPROCESSORS_ONLN) --inplace
 
-          # Patching in the correct SDL2
-          cd wheelhouse
-          yum -y install zip
-          for f in *.whl; do
-              echo "Patching $f file..."
-              SDLNAME=$(unzip -l $f | egrep -wo "(pyboy.libs/libSDL2.*$)")
-              mkdir -p pyboy.libs
-              cp /usr/local/lib/libSDL2-2.0.so.0 $SDLNAME
-              # Updating single SDL2 file in the .zip (.whl)
-              zip $f $SDLNAME
-          done
-          cd ..
+          echo "Starting pytests"
+          PYTEST_SECRETS_KEY=${{ secrets.PYTEST_SECRETS_KEY }} TEST_NO_UI=1 timeout 600 python -m pytest tests/ pyboy/ docs/ -n auto -v --benchmark-disable
 
-          rm -rf dist/*.whl
-          mv wheelhouse/*.whl dist/
-          chmod 777 -R . # Fix permissions to help cleaning up outside of Docker
-    - name: Set up Python 3.8 (just for PyPi upload)
-      uses: actions/setup-python@v2
+          if [[ "${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease }}" == "true" ]]; then
+            echo "Building wheel"
+            python -m pip install wheel
+            python setup.py sdist bdist_wheel
+
+            python -m pip install auditwheel
+            auditwheel repair dist/*.whl
+
+            rm -rf dist/*.whl
+            mv wheelhouse/*.whl dist/
+            chmod 777 -R . # Fix permissions to help cleaning up outside of Docker
+
+            echo "Dists built:"
+            ls -lah dist/
+          fi
+
+    - name: Set up Python 3.11 (just for PyPi upload)
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease }}
+      uses: actions/setup-python@v5
       with:
-        python-version: 3.8
+        python-version: 3.11
     - name: Upload wheel
-      if: ${{ github.event_name == 'release' && github.event.action == 'published' }}
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && !github.event.release.prerelease }}
       run: |
         echo "Uploading wheel"
         pip install twine
         python -m twine upload --non-interactive -u '__token__' -p ${{ secrets.PYPI_API_TOKEN }} dist/*.whl
+    - name: Upload wheel [TEST]
+      if: ${{ github.event_name == 'release' && github.event.action == 'published' && github.event.release.prerelease }}
+      run: |
+        echo "Uploading wheel"
+        pip install twine
+        python -m twine upload --repository testpypi --non-interactive -u '__token__' -p ${{ secrets.PYPI_TEST_API_TOKEN }} dist/*.whl

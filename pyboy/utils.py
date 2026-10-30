@@ -3,7 +3,192 @@
 # GitHub: https://github.com/Baekalfen/PyBoy
 #
 
-STATE_VERSION = 7
+__all__ = [
+    "WindowEvent",
+    "dec_to_bcd",
+    "bcd_to_dec",
+    "PyBoyException",
+    "PyBoyInternalError",
+    "PyBoyAssertException",
+    "PyBoyOutOfBoundsException",
+    "PyBoyNotImplementedException",
+    "PyBoyInvalidInputException",
+    "PyBoyInvalidOperationException",
+    "PyBoyDependencyError",
+    "PyBoyFeatureDisabledError",
+    "AccessError",
+    "PillowImportError",
+    "SoundEnabledError",
+    "likely",
+    "unlikely",
+]
+
+STATE_VERSION = 30
+
+INTR_VBLANK, INTR_LCDC, INTR_TIMER, INTR_SERIAL, INTR_HIGHTOLOW = [1 << x for x in range(5)]
+OPCODE_BRK = 0xDB
+FRAME_CYCLES = 70224
+CLOCK_RATE = 4_194_304
+MAX_CYCLES = 1 << 31
+
+
+class PyBoyException(Exception):
+    """
+    Custom exception class for PyBoy-related errors.
+
+    This exception is raised for errors specific to the PyBoy emulator.
+    """
+
+    pass
+
+
+class PyBoyInternalError(PyBoyException):
+    """
+    Exception raised for internal errors in the PyBoy emulator.
+
+    This exception is used to indicate errors that occur within the PyBoy
+    emulator that are not expected to be encountered by the end user.
+    """
+
+    pass
+
+
+class PyBoyAssertException(PyBoyException):
+    """
+    Exception is used to indicate assertion errors that occur within the PyBoy emulator.
+    """
+
+    pass
+
+
+class PyBoyOutOfBoundsException(PyBoyException):
+    """
+    Exception raised for errors when an operation exceeds array or integer bounds in PyBoy.
+    """
+
+    pass
+
+
+class PyBoyNotImplementedException(PyBoyException):
+    """
+    Exception raised for methods that are not yet implemented in a base class.
+    """
+
+    pass
+
+
+class PyBoyInvalidInputException(PyBoyException):
+    """
+    Exception is used to indicate that an invalid input has been provided to a PyBoy function or method.
+    """
+
+    pass
+
+
+class PyBoyInvalidOperationException(PyBoyException):
+    """
+    Exception raised when the user requests an invalid operation, which cannot be performed.
+    """
+
+    pass
+
+
+class PyBoyDependencyError(PyBoyException):
+    """
+    Exception raised for errors related to missing dependencies in PyBoy.
+    """
+
+    pass
+
+
+class PyBoyFeatureDisabledError(PyBoyException):
+    """
+    Exception raised when the user requests a feature that has been disabled.
+    """
+
+    pass
+
+
+class AccessError(PyBoyException):
+    """
+    Base class that replaces an optional feature. Whenever this object is accessed,
+    it raises a predefined exception. I.e. on missing dependencies etc.
+    """
+
+    _exception_type = PyBoyException
+    _exception_message = "Access Error"
+
+    def __bool__(self):
+        return False
+
+    def __getattribute__(self, name):
+        if name in ("_exception_type", "_exception_message"):
+            return super().__getattribute__(name)
+        raise self._exception_type(self._exception_message)
+
+    def __setattribute__(self, *args):
+        raise self._exception_type(self._exception_message)
+
+    def __getitem__(self, *args):
+        raise self._exception_type(self._exception_message)
+
+    def __setitem__(self, *args):
+        raise self._exception_type(self._exception_message)
+
+
+class PillowImportError(AccessError, PyBoyDependencyError):
+    """
+    Exception raised when the Pillow library is not found.
+    """
+
+    _exception_type = PyBoyDependencyError
+    _exception_message = "Missing dependency Pillow!"
+
+
+class SoundEnabledError(AccessError, PyBoyFeatureDisabledError):
+    """
+    Compatibility exception for disabled sound access. Current sound accessors raise
+    `PyBoyFeatureDisabledError`.
+    """
+
+    _exception_type = PyBoyFeatureDisabledError
+    _exception_message = "Sound is not enabled!"
+
+
+def likely(value):
+    return value
+
+
+def unlikely(value):
+    return value
+
+
+class _CythonContext:
+    def __enter__(self):
+        pass
+
+    def __exit__(self, *args):
+        pass
+
+
+try:
+    from cython import compiled
+
+    cython_compiled = compiled
+except ImportError:
+    cython_compiled = False
+    import sys
+    from types import ModuleType
+
+    cython = ModuleType("cython")
+    cython.__path__ = []
+    cython.compiled = False
+    cython.gil = _CythonContext()
+    cython.nogil = _CythonContext()
+    cython.likely = likely
+    cython.unlikely = unlikely
+
+    sys.modules["cython"] = cython
 
 ##############################################################
 # Buffer classes
@@ -14,13 +199,34 @@ class IntIOInterface:
         pass
 
     def write(self, byte):
-        raise Exception("Not implemented!")
+        raise PyBoyNotImplementedException("Not implemented!")
+
+    def write_64bit(self, value):
+        self.write(value & 0xFF)
+        self.write((value >> 8) & 0xFF)
+        self.write((value >> 16) & 0xFF)
+        self.write((value >> 24) & 0xFF)
+        self.write((value >> 32) & 0xFF)
+        self.write((value >> 40) & 0xFF)
+        self.write((value >> 48) & 0xFF)
+        self.write((value >> 56) & 0xFF)
+
+    def read_64bit(self):
+        a = self.read()
+        b = self.read()
+        c = self.read()
+        d = self.read()
+        e = self.read()
+        f = self.read()
+        g = self.read()
+        h = self.read()
+        return a | (b << 8) | (c << 16) | (d << 24) | (e << 32) | (f << 40) | (g << 48) | (h << 56)
 
     def write_32bit(self, value):
         self.write(value & 0xFF)
-        self.write((value & 0xFF00) >> 8)
-        self.write((value & 0xFF0000) >> 16)
-        self.write((value & 0xFF000000) >> 24)
+        self.write((value >> 8) & 0xFF)
+        self.write((value >> 16) & 0xFF)
+        self.write((value >> 24) & 0xFF)
 
     def read_32bit(self):
         a = self.read()
@@ -31,7 +237,7 @@ class IntIOInterface:
 
     def write_16bit(self, value):
         self.write(value & 0xFF)
-        self.write((value & 0xFF00) >> 8)
+        self.write((value >> 8) & 0xFF)
 
     def read_16bit(self):
         a = self.read()
@@ -39,22 +245,25 @@ class IntIOInterface:
         return int(a | (b << 8))
 
     def read(self):
-        raise Exception("Not implemented!")
+        raise PyBoyNotImplementedException("Not implemented!")
 
     def seek(self, pos):
-        raise Exception("Not implemented!")
+        raise PyBoyNotImplementedException("Not implemented!")
 
     def flush(self):
-        raise Exception("Not implemented!")
+        raise PyBoyNotImplementedException("Not implemented!")
 
     def new(self):
-        raise Exception("Not implemented!")
+        raise PyBoyNotImplementedException("Not implemented!")
 
     def commit(self):
-        raise Exception("Not implemented!")
+        raise PyBoyNotImplementedException("Not implemented!")
 
     def seek_frame(self, _):
-        raise Exception("Not implemented!")
+        raise PyBoyNotImplementedException("Not implemented!")
+
+    def tell(self):
+        raise PyBoyNotImplementedException("Not implemented!")
 
 
 class IntIOWrapper(IntIOInterface):
@@ -62,18 +271,21 @@ class IntIOWrapper(IntIOInterface):
     Wraps a file-like object to allow writing integers to it.
     This allows for higher performance, when writing to a memory map in rewind.
     """
+
     def __init__(self, buf):
         self.buffer = buf
 
     def write(self, byte):
-        assert isinstance(byte, int)
-        assert 0 <= byte <= 0xFF
+        if not isinstance(byte, int):
+            raise PyBoyAssertException("Input has to be of type 'int'")
+        if not (0 <= byte <= 0xFF):
+            raise PyBoyOutOfBoundsException("Input has to be positive and less than or equal to 255")
         return self.buffer.write(byte.to_bytes(1, "little"))
 
     def read(self):
-        # assert count == 1, "Only a count of 1 is supported"
         data = self.buffer.read(1)
-        assert len(data) == 1, "No data"
+        if not (len(data) == 1):
+            raise PyBoyAssertException("No data")
         return ord(data)
 
     def seek(self, pos):
@@ -82,51 +294,60 @@ class IntIOWrapper(IntIOInterface):
     def flush(self):
         self.buffer.flush()
 
+    def tell(self):
+        return self.buffer.tell()
+
 
 ##############################################################
 # Misc
 
+if not cython_compiled:
+    exec(
+        """
+from math import ceil
+def double_to_uint64_ceil(val):
+    return ceil(val)
 
-# TODO: Would a lookup-table increase performance? For example a lookup table of each 4-bit nibble?
-# That's 16**2 = 256 values. Index calculated as: (byte1 & 0xF0) | ((byte2 & 0xF0) >> 4)
-# and then: (byte1 & 0x0F) | ((byte2 & 0x0F) >> 4)
-# Then could even be preloaded for each color palette
-def color_code(byte1, byte2, offset):
-    """Convert 2 bytes into color code at a given offset.
+import array
+def malloc(n):
+    return array.array('B', [0]*(n))
 
-    The colors are 2 bit and are found like this:
+def free(buffer):
+    del(buffer)
+"""
+    )
+else:
+    exec("""
+def malloc(n):
+    raise PyBoyInternalError("Called Python version of malloc from Cython! Should be cimported")
 
-    Color of the first pixel is 0b10
-    | Color of the second pixel is 0b01
-    v v
-    1 0 0 1 0 0 0 1 <- byte1
-    0 1 1 1 1 1 0 0 <- byte2
-    """
-    return (((byte2 >> (offset)) & 0b1) << 1) + ((byte1 >> (offset)) & 0b1)
-
-
-def flatten_list(l):
-    flat_list = []
-    for sublist in l:
-        for item in sublist:
-            flat_list.append(item)
-    return flat_list
-
+def free(buffer):
+    raise PyBoyInternalError("Called Python version of free from Cython! Should be cimported")
+""")
 
 ##############################################################
+
 # Window Events
 # Temporarily placed here to not be exposed on public API
 
 
 class WindowEvent:
     """
-    All supported events can be found in the class description below.
+    Namespace of integer constants representing supported input and emulator events.
 
-    It can be used as follows:
+    Pass one of these constants to `PyBoy.send_input`:
 
-    >>> from pyboy import PyBoy, WindowEvent
-    >>> pyboy = PyBoy('file.rom')
-    >>> pyboy.send_input(WindowEvent.PRESS_ARROW_RIGHT)
+    ```python
+    >>> from pyboy.utils import WindowEvent
+    >>> pyboy.send_input(WindowEvent.PAUSE)
+
+    ```
+
+    Just for button presses, it might be easier to use: `pyboy.PyBoy.button`,
+    `pyboy.PyBoy.button_press` and `pyboy.PyBoy.button_release`.
+
+    See :ref:`WindowEvent options <window-event-options>` for the complete list
+    of supported events.
     """
 
     # ONLY ADD NEW EVENTS AT THE END OF THE LIST!
@@ -173,19 +394,24 @@ class WindowEvent:
         DEBUG_MEMORY_SCROLL_UP,
         MOD_SHIFT_ON,
         MOD_SHIFT_OFF,
-    ) = range(41)
+        FULL_SCREEN_TOGGLE,
+        CYCLE_PALETTE,
+        SCREEN_RECORDING_TOGGLE_MP4,
+        DEBUG_GAME_AREA_TOGGLE,
+    ) = range(45)
 
     def __init__(self, event):
-        self.event = event
+        self.__event = event
 
-    def __eq__(self, x):
-        if isinstance(x, int):
-            return self.event == x
-        else:
-            return self.event == x.event
+    def __eq__(self, other):
+        if isinstance(other, WindowEvent):
+            return self.__event == other.__event
+        elif isinstance(other, int):
+            return self.__event == other
+        return NotImplemented
 
     def __int__(self):
-        return self.event
+        return self.__event
 
     def __str__(self):
         return (
@@ -230,7 +456,11 @@ class WindowEvent:
             "DEBUG_MEMORY_SCROLL_UP",
             "MOD_SHIFT_ON",
             "MOD_SHIFT_OFF",
-        )[self.event]
+            "FULL_SCREEN_TOGGLE",
+            "CYCLE_PALETTE",
+            "SCREEN_RECORDING_TOGGLE_MP4",
+            "DEBUG_GAME_AREA_TOGGLE",
+        )[self.__event]
 
 
 class WindowEventMouse(WindowEvent):
@@ -244,3 +474,87 @@ class WindowEventMouse(WindowEvent):
         self.mouse_scroll_x = mouse_scroll_x
         self.mouse_scroll_y = mouse_scroll_y
         self.mouse_button = mouse_button
+
+
+def _dec_to_bcd(bytes):
+    bcd_result = []
+    for b in bytes:
+        tens = (b // 10) << 4
+        ones = b % 10
+        bcd_result.append(tens | ones)
+    return bcd_result
+
+
+def _bcd_to_dec(bytes):
+    dec_results = []
+    for b in bytes:
+        tens = (b >> 4) * 10
+        ones = b & 0x0F
+        dec_results.append(tens + ones)
+    return dec_results
+
+
+def dec_to_bcd(value, byte_width=1, byteorder="little"):
+    """
+    Converts a decimal value to Binary Coded Decimal (BCD).
+
+    Args:
+        value (int): The integer value to convert.
+        byte_width (int): The number of bytes to consider for each value.
+        byteorder (str): The endian type to use. This is only used for 16-bit values and higher. See [int.from_bytes](https://docs.python.org/3/library/stdtypes.html#int.from_bytes) for more details.
+
+    Example:
+    ```python
+    >>> from pyboy.utils import dec_to_bcd
+    >>> f"{dec_to_bcd(30):08b}"
+    '00110000'
+    >>> f"{dec_to_bcd(32):08b}"
+    '00110010'
+
+    ```
+
+    Returns:
+        int: The BCD equivalent of the decimal value.
+    """
+    bcd_result = []
+    for _ in range(byte_width):
+        tens = ((value % 100) // 10) << 4
+        units = value % 10
+        bcd_byte = (tens | units) & 0xFF
+        bcd_result.append(bcd_byte)
+        value //= 100
+    return int.from_bytes(bcd_result, byteorder)
+
+
+def bcd_to_dec(value, byte_width=1, byteorder="little"):
+    """
+    Converts a Binary Coded Decimal (BCD) value to decimal.
+
+    Args:
+        value (int): The BCD value to convert.
+        byte_width (int): The number of bytes to consider for each value.
+        byteorder (str): The endian type to use. This is only used for 16-bit values and higher. See [int.to_bytes](https://docs.python.org/3/library/stdtypes.html#int.to_bytes) for more details.
+
+    Example:
+    ```python
+    >>> from pyboy.utils import bcd_to_dec
+    >>> bcd_to_dec(0b00110000)
+    30
+    >>> bcd_to_dec(0b00110010)
+    32
+
+    ```
+
+    Returns:
+        int: The decimal equivalent of the BCD value.
+    """
+    decimal_value = 0
+    multiplier = 1
+
+    bcd_bytes = value.to_bytes(byte_width, byteorder)
+
+    for bcd_byte in bcd_bytes:
+        decimal_value += ((bcd_byte >> 4) * 10 + (bcd_byte & 0x0F)) * multiplier
+        multiplier *= 100
+
+    return decimal_value

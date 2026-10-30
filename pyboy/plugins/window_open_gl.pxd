@@ -4,21 +4,24 @@
 #
 
 import cython
+
 cimport cython
-from libc.stdint cimport uint8_t, uint16_t, uint32_t
-from pyboy.plugins.base_plugin cimport PyBoyWindowPlugin
+
+from pyboy.logging.logging cimport Logger
+from pyboy.plugins.window_openal cimport WindowOpenAL
 
 
+cdef Logger logger
 
 cdef int ROWS, COLS
 
-cdef class WindowOpenGL(PyBoyWindowPlugin):
+cdef class WindowOpenGL(WindowOpenAL):
     cdef list events
 
-    cdef void _glkeyboard(self, str, int, int, bint)
-    cdef void _glkeyboardspecial(self, char, int, int, bint)
+    cdef void _glkeyboard(self, str, int, int, bint) noexcept
+    cdef void _glkeyboardspecial(self, char, int, int, bint) noexcept
 
     # TODO: Callbacks don't really work, when Cythonized
-    cpdef void _gldraw(self)
-    @cython.locals(scale=float)
-    cpdef void _glreshape(self, int, int)
+    cpdef void _gldraw(self) noexcept
+    @cython.locals(scale=double)
+    cpdef void _glreshape(self, int, int) noexcept
